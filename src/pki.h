@@ -27,5 +27,7 @@
 #define SHA256 CC_SHA256
 #undef MD5
 #define MD5 CC_MD5
+#undef SHA512
+#define SHA512 CC_SHA512
 #endif
 #endif

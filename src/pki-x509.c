@@ -347,6 +347,55 @@ SEXP PKI_encrypt(SEXP what, SEXP sKey, SEXP sCipher, SEXP sIV) {
     return res;
 }
 
+SEXP PKI_private_encrypt(SEXP what, SEXP sKey, SEXP sCipher, SEXP sIV) {
+  SEXP res;
+  EVP_PKEY *key;
+  RSA *rsa;
+  int len;
+  if (TYPEOF(what) != RAWSXP)
+    Rf_error("invalid payload to sign - must be a raw vector");
+  if (!inherits(sKey, "public.key") && !inherits(sKey, "private.key")) {
+    int transient_cipher = 0;
+    EVP_CIPHER_CTX *ctx = get_cipher(sKey, sCipher, 1, &transient_cipher, sIV);
+    int block_len = EVP_CIPHER_CTX_block_size(ctx);
+    int padding = LENGTH(what) % block_len;
+    /* Note: padding is always required, so if the last block is full, there
+    must be an extra block added at the end */
+    padding = block_len - padding;
+    /* FIXME: ctx will leak on alloc errors for transient ciphers - wrap them first */
+    res = allocVector(RAWSXP, len = (LENGTH(what) + padding));
+    if (!EVP_CipherUpdate(ctx, RAW(res), &len, RAW(what), LENGTH(what))) {
+      if (transient_cipher) {
+        EVP_CIPHER_CTX_cleanup(ctx);
+        free(ctx);
+      }
+      Rf_error("%s", ERR_error_string(ERR_get_error(), NULL));
+    }
+    if (len < LENGTH(res))
+      EVP_CipherFinal(ctx, RAW(res) + len, &len);
+    if (transient_cipher) {
+      EVP_CIPHER_CTX_cleanup(ctx);
+      free(ctx);
+    }
+    return res;
+  }
+  
+  key = (EVP_PKEY*) R_ExternalPtrAddr(sKey);
+  if (!key)
+    Rf_error("NULL key");
+  if (EVP_PKEY_get_key_type_(key) != EVP_PKEY_RSA)
+    Rf_error("Sorry only RSA keys are supported at this point");
+  rsa = EVP_PKEY_get1_RSA(key);
+  if (!rsa)
+    Rf_error("%s", ERR_error_string(ERR_get_error(), NULL));
+  len = RSA_private_encrypt(LENGTH(what), RAW(what), (unsigned char*) buf, rsa, RSA_NO_PADDING);
+  if (len < 0)
+    Rf_error("%s", ERR_error_string(ERR_get_error(), NULL));
+  res = allocVector(RAWSXP, len);
+  memcpy(RAW(res), buf, len);
+  return res;
+}
+
 SEXP PKI_decrypt(SEXP what, SEXP sKey, SEXP sCipher, SEXP sIV) {
     SEXP res;
     EVP_PKEY *key;
@@ -396,10 +445,11 @@ SEXP PKI_decrypt(SEXP what, SEXP sKey, SEXP sCipher, SEXP sIV) {
 #define PKI_SHA1 1
 #define PKI_SHA256 2
 #define PKI_MD5  3
+#define PKI_SHA512  4
 
 SEXP PKI_digest(SEXP sWhat, SEXP sMD) {
     SEXP res;
-    unsigned char hash[32]; /* really, at most 20 bytes are needed */
+    unsigned char hash[64]; /* really, at most 20 bytes are needed */
     int len, md = asInteger(sMD);
     const unsigned char *what;
     int what_len;
@@ -426,7 +476,11 @@ SEXP PKI_digest(SEXP sWhat, SEXP sMD) {
 	MD5(what, what_len, hash);
 	len = MD5_DIGEST_LENGTH;
 	break;
-    default:
+	case PKI_SHA512:
+	  SHA512(what, what_len, hash);
+	  len=SHA512_DIGEST_LENGTH;
+	  break;
+  default:
 	Rf_error("unsupported hash function");
 	len = 0; /* dead code but needed to appease compilers */
     }
@@ -451,13 +505,17 @@ SEXP PKI_sign_RSA(SEXP what, SEXP sMD, SEXP sKey) {
     case PKI_SHA256:
       type = NID_sha256;
       break;
+    case PKI_SHA512:
+      type = NID_sha512;
+      break;
     default:
       Rf_error("unsupported hash type");
   }
     if (TYPEOF(what) != RAWSXP ||
 	(md == PKI_MD5 && LENGTH(what) != MD5_DIGEST_LENGTH) ||
 	(md == PKI_SHA1 && LENGTH(what) != SHA_DIGEST_LENGTH) ||
-  (md == PKI_SHA256 && LENGTH(what) != SHA256_DIGEST_LENGTH))
+  (md == PKI_SHA256 && LENGTH(what) != SHA256_DIGEST_LENGTH) ||
+  (md == PKI_SHA512 && LENGTH(what) != SHA512_DIGEST_LENGTH))
 	Rf_error("invalid hash");
     if (!inherits(sKey, "private.key"))
 	Rf_error("key must be RSA private key");
@@ -493,13 +551,17 @@ SEXP PKI_verify_RSA(SEXP what, SEXP sMD, SEXP sKey, SEXP sig) {
     case PKI_SHA256:
   type = NID_sha256;
   break;
+    case PKI_SHA512:
+      type = NID_sha512;
+      break;
     default:
   Rf_error("unsupported hash type");
   }
     if (TYPEOF(what) != RAWSXP ||
   (md == PKI_MD5 && LENGTH(what) != MD5_DIGEST_LENGTH) ||
   (md == PKI_SHA1 && LENGTH(what) != SHA_DIGEST_LENGTH) ||
-  (md == PKI_SHA256 && LENGTH(what) != SHA256_DIGEST_LENGTH))
+  (md == PKI_SHA256 && LENGTH(what) != SHA256_DIGEST_LENGTH) ||
+  (md == PKI_SHA512 && LENGTH(what) != SHA512_DIGEST_LENGTH))
 	Rf_error("invalid hash");
     if (!inherits(sKey, "public.key") && !inherits(sKey, "private.key"))
 	Rf_error("key must be RSA public or private key");
